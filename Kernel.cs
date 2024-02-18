@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Microsoft.Win32.SafeHandles;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using Sys = Cosmos.System;
@@ -10,15 +11,29 @@ namespace Jupiter
 
         protected override void BeforeRun()
         {
-            Console.WriteLine("Cosmos booted successfully. Type a line of text to get it echoed back.");
+            Console.Clear();
+            // Console.WriteLine("Jupiter booted successfully.");
         }
 
         protected override void Run()
         {
-            Console.Write("Input: ");
-            var input = Console.ReadLine();
-            Console.Write("Text typed: ");
-            Console.WriteLine(input);
+            Console.Write("Jupiter# ");
+            var input = Console.ReadLine().ToLower().Trim();
+            switch(input) 
+            {
+                case "": break;
+                case "poweroff":
+                case "shutdown":
+                    Commands.PowerOff(); break;
+                case "reboot":
+                case "restart":
+                    Commands.Reboot(); break;
+                case "clear":
+                case "pak":
+                    Commands.Clear(); break;
+                default:
+                    Commands.NotFound(); break;
+            }
         }
     }
 }
