@@ -358,7 +358,7 @@ static void paging_build_user_space(uint32_t slot)
         pt[i] = 0;
     }
     pd[0] = ((uint32_t)first_page_table) | 0x003u;
-    pt[0] = ((uint32_t)user_code_pages[slot]) | 0x005u;
+    pt[0] = ((uint32_t)user_code_pages[slot]) | 0x007u;
     pt[1] = ((uint32_t)user_stack_pages[slot]) | 0x007u;
     pd[1] = ((uint32_t)pt) | 0x007u;
 }
@@ -453,8 +453,10 @@ struct fs_superblock {
     uint32_t dir_entries;
     uint32_t data_lba;
     uint32_t total_sectors;
-    uint8_t reserved[480];
+    uint8_t reserved[484];
 } __attribute__((packed));
+
+_Static_assert(sizeof(struct fs_superblock) == 512, "superblock must be one sector");
 
 struct fs_dirent {
     char name[16];
@@ -1036,6 +1038,8 @@ static void pic_init(void)
 
 /* ---------------- Scheduler / process management ---------------- */
 
+static volatile uint32_t timer_ticks = 0;
+
 #define MAX_TASKS        8
 #define TASK_STACK_SIZE  4096u
 
@@ -1173,6 +1177,7 @@ static int task_is_runnable(int i)
 
 uint32_t scheduler_tick(uint32_t saved_esp)
 {
+    timer_ticks++;
     tasks[current_task].esp = saved_esp;
     tasks[current_task].ticks++;
     if (tasks[current_task].state == TASK_RUNNING)
@@ -1259,7 +1264,6 @@ uint32_t syscall_handler(uint32_t *frame)
 
 /* ---------------- PIT timer IRQ0 ---------------- */
 
-static volatile uint32_t timer_ticks = 0;
 
 static void pit_init(void)
 {
@@ -1267,12 +1271,6 @@ static void pit_init(void)
     outb(0x43, 0x36);
     outb(0x40, (uint8_t)(PIT_DIVISOR & 0xFF));
     outb(0x40, (uint8_t)((PIT_DIVISOR >> 8) & 0xFF));
-}
-
-void timer_irq_handler(void)
-{
-    timer_ticks++;
-    outb(0x20, 0x20);
 }
 
 static uint32_t timer_seconds(void)
@@ -1516,7 +1514,8 @@ static void shell_exec(const char *args)
         terminal_write("Unable to load JEXE program.\n");
         return;
     }
-    for (uint32_t i = 0; i < PAGE_SIZE; i++) user_stack_pages[pid - 4][i] = 0;
+    for (uint32_t i = 0; i < PAGE_SIZE; i++)
+        user_stack_pages[pid - 4][i] = 0;
     uint32_t user_sp = build_user_stack(user_stack_pages[pid - 4], argc, (const char *const *)argv);
     uint32_t sp = user_initial_context(task_stacks[pid], entry, user_sp);
     if (!user_sp || !sp) {
