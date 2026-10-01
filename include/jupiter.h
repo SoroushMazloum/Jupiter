@@ -42,4 +42,20 @@ static inline void j_exit(uint32_t code)
     for (;;) j_yield();
 }
 
+static inline void j_print_uint(uint32_t value)
+{
+    char digits[10];
+    char out[10];
+    int n = 0;
+
+    if (value == 0) { j_print("0"); return; }
+    while (value) {
+        digits[n++] = (char)('0' + value % 10u);
+        value /= 10u;
+    }
+    for (int i = 0; i < n; i++)
+        out[i] = digits[n - 1 - i];
+    j_write(out, (uint32_t)n);
+}
+
 #endif

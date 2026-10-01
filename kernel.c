@@ -33,6 +33,11 @@ static uint8_t terminal_color = 0x1F;
 static int cursor_row = 0;
 static int cursor_col = 0;
 
+static volatile int shell_input_active = 0;   /* 1 while the prompt is waiting for input */
+static volatile int shell_async_midline = 0;  /* 1 if background output left a partial line */
+static void shell_async_begin(void);
+static void shell_async_end(void);
+
 /*
  * VGA output is shared by the kernel shell and Ring 3 processes.  The PIT
  * can preempt a task in the middle of a multi-character print, so save the
@@ -630,6 +635,10 @@ static int fs_load_jexe(const char *name, uint8_t *code_page, uint32_t *entry_ou
     /* Move the executable image over its header. */
     for (uint32_t i = 0; i < image_size; i++)
         code_page[i] = code_page[sizeof(struct jexe_header) + i];
+    
+    /* Zero everything after the image so .bss starts clean. */
+    for (uint32_t i = image_size; i < PAGE_SIZE; i++)
+        code_page[i] = 0;
 
     *entry_out = entry;
     if (image_size_out)
@@ -1234,8 +1243,10 @@ uint32_t syscall_handler(uint32_t *frame)
         if (len > USER_STACK_TOP - ptr) len = USER_STACK_TOP - ptr;
 
         uint32_t flags = irq_save();
+        shell_async_begin();
         for (uint32_t i = 0; i < len; i++)
             terminal_putc(*(volatile char *)ptr++);
+        shell_async_end();
         irq_restore(flags);
         break;
     }
@@ -1244,9 +1255,11 @@ uint32_t syscall_handler(uint32_t *frame)
         tasks[current_task].state = TASK_ZOMBIE;
 
         uint32_t flags = irq_save();
+        shell_async_begin();
         terminal_write("[kernel] process ");
         print_uint(tasks[current_task].id);
         terminal_write(" exited\n");
+        shell_async_end();
         irq_restore(flags);
         break;
     }
@@ -1395,6 +1408,8 @@ static int command_cursor = 0;
 static void shell_prompt(void)
 {
     terminal_write("jupiter> ");
+    shell_async_midline = 0;
+    shell_input_active = 1;
 }
 
 static void shell_redraw(void)
@@ -1418,6 +1433,38 @@ static void shell_redraw(void)
     cursor_col = prompt_col + command_cursor;
     cursor_update();
     irq_restore(flags);
+}
+
+static void shell_async_begin(void)
+{
+    if (!shell_input_active || shell_async_midline)
+        return;
+    /* Wipe the prompt line so the output starts at column 0. */
+    for (int c = 0; c < VGA_WIDTH; c++)
+        VGA_MEMORY[cursor_row * VGA_WIDTH + c] =
+            ((uint16_t)terminal_color << 8) | ' ';
+    cursor_col = 0;
+    cursor_update();
+}
+
+static void shell_prompt_restore(void)
+{
+    if (cursor_col != 0)
+        terminal_putc('\n');
+    terminal_write("jupiter> ");
+    shell_redraw();
+    shell_async_midline = 0;
+}
+
+static void shell_async_end(void)
+{
+    if (!shell_input_active)
+        return;
+    if (cursor_col != 0) {          /* output stopped mid-line: wait for the rest */
+        shell_async_midline = 1;
+        return;
+    }
+    shell_prompt_restore();
 }
 
 static void shell_move_left(void)
@@ -1870,24 +1917,44 @@ void kmain(void)
 
     shell_prompt();
 
-    __asm__ volatile ("sti");
+    __asm__ volatile("sti");
 
-    for (;;) {
+    for (;;)
+    {
         uint16_t key = keyboard_getkey();
 
-        if (key == KEY_LEFT) {
+        if (shell_async_midline)
+        {
+            uint32_t f = irq_save();
+            shell_prompt_restore();
+            irq_restore(f);
+        }
+
+        if (key == KEY_LEFT)
+        {
             shell_move_left();
-        } else if (key == KEY_RIGHT) {
+        }
+        else if (key == KEY_RIGHT)
+        {
             shell_move_right();
-        } else if (key == KEY_DELETE) {
+        }
+        else if (key == KEY_DELETE)
+        {
             shell_delete();
-        } else if (key == '\b') {
+        }
+        else if (key == '\b')
+        {
             shell_backspace();
-        } else if (key == '\n') {
+        }
+        else if (key == '\n')
+        {
+            shell_input_active = 0;
             shell_execute();
             command_len = 0;
             command_cursor = 0;
-        } else if (key < 128 && key >= 32) {
+        }
+        else if (key < 128 && key >= 32)
+        {
             shell_insert_char((char)key);
         }
     }

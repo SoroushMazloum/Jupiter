@@ -12,9 +12,15 @@ static void print_uint(uint32_t value)
     }
     while (n--) j_write(&digits[n], 1);
 }
-
+static uint32_t zeros[64];
 int main(int argc, char **argv)
 {
+    uint32_t sum = 0;
+    for (int i = 0; i < 64; i++)
+        sum += zeros[i];
+    j_print("bss sum: ");
+    print_uint(sum);
+    j_print("\n");
     j_print("Hello from a C userspace program!\n");
     j_print("PID: ");
     print_uint(j_getpid());
