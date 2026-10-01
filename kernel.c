@@ -893,6 +893,7 @@ extern void irq1_stub(void);
 extern void default_irq_stub(void);
 extern void page_fault_stub(void);
 extern void syscall_stub(void);
+extern uint32_t exception_stub_table[20];
 
 static void idt_set_gate(int vector, uint32_t handler)
 {
@@ -908,9 +909,11 @@ static void idt_init(void)
     for (int i = 0; i < IDT_ENTRIES; i++)
         idt_set_gate(i, (uint32_t)default_irq_stub);
 
+    for (int i = 0; i < 20; i++)
+        idt_set_gate(i, exception_stub_table[i]);
+
     idt_set_gate(TIMER_VECTOR, (uint32_t)irq0_stub);
     idt_set_gate(KEYBOARD_VECTOR, (uint32_t)irq1_stub);
-    idt_set_gate(PAGE_FAULT_VECTOR, (uint32_t)page_fault_stub);
 
     idt[0x80].offset_low = (uint16_t)((uint32_t)syscall_stub & 0xFFFF);
     idt[0x80].selector = 0x08;
@@ -1184,9 +1187,8 @@ static int task_is_runnable(int i)
     return tasks[i].state == TASK_READY || tasks[i].state == TASK_RUNNING;
 }
 
-uint32_t scheduler_tick(uint32_t saved_esp)
+static uint32_t schedule(uint32_t saved_esp)
 {
-    timer_ticks++;
     tasks[current_task].esp = saved_esp;
     tasks[current_task].ticks++;
     if (tasks[current_task].state == TASK_RUNNING)
@@ -1206,9 +1208,76 @@ uint32_t scheduler_tick(uint32_t saved_esp)
         tss.esp0 = 0x90000;
         switch_kernel_address_space();
     }
-
-    outb(0x20, 0x20);
     return tasks[current_task].esp;
+}
+
+uint32_t scheduler_tick(uint32_t saved_esp)
+{
+    timer_ticks++;
+    uint32_t next_esp = schedule(saved_esp);
+    outb(0x20, 0x20);
+    return next_esp;
+}
+
+static void print_hex(uint32_t v)
+{
+    terminal_write("0x");
+    for (int i = 28; i >= 0; i -= 4) {
+        uint8_t n = (uint8_t)((v >> i) & 0xFu);
+        terminal_putc(n < 10 ? (char)('0' + n) : (char)('A' + n - 10));
+    }
+}
+
+static const char *const exception_names[20] = {
+    "divide error", "debug", "NMI", "breakpoint", "overflow",
+    "bound range exceeded", "invalid opcode", "device not available",
+    "double fault", "coprocessor overrun", "invalid TSS",
+    "segment not present", "stack fault", "general protection fault",
+    "page fault", "reserved", "x87 FPU error", "alignment check",
+    "machine check", "SIMD FP exception"
+};
+
+uint32_t exception_handler(uint32_t *frame)
+{
+    uint32_t vector = frame[8];
+    uint32_t err    = frame[9];
+    uint32_t eip    = frame[10];
+    uint32_t cs     = frame[11];
+    uint32_t cr2 = 0;
+    if (vector == 14)
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+    if ((cs & 3u) == 3u && tasks[current_task].user) {
+        /* A user process faulted: report it, kill it, run something else. */
+        shell_async_begin();
+        terminal_write("[kernel] process ");
+        print_uint(tasks[current_task].id);
+        terminal_write(" crashed: ");
+        terminal_write(vector < 20 ? exception_names[vector] : "exception");
+        terminal_write(" at eip=");
+        print_hex(eip);
+        if (vector == 14) {
+            terminal_write(" addr=");
+            print_hex(cr2);
+        }
+        terminal_putc('\n');
+        shell_async_end();
+
+        tasks[current_task].exit_code = 139;
+        tasks[current_task].state = TASK_ZOMBIE;
+        return schedule((uint32_t)frame);
+    }
+
+    /* A fault inside the kernel is a bug: print what we know and stop. */
+    terminal_write("\nKERNEL PANIC: ");
+    terminal_write(vector < 20 ? exception_names[vector] : "exception");
+    terminal_write("\nvector=");  print_uint(vector);
+    terminal_write(" err=");      print_hex(err);
+    terminal_write(" eip=");      print_hex(eip);
+    if (vector == 14) { terminal_write(" cr2="); print_hex(cr2); }
+    terminal_putc('\n');
+    for (;;)
+        __asm__ volatile ("cli; hlt");
 }
 
 static int alloc_user_task(void)
