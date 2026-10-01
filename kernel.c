@@ -17,7 +17,7 @@
 #define HEAP_END        0x00200000u
 #define HEAP_SIZE       (HEAP_END - HEAP_START)
 #define HEAP_MAGIC      0x4A484541u
-#define COMMAND_MAX     70
+#define COMMAND_MAX     150
 #define KEY_LEFT        0x100
 #define KEY_RIGHT       0x101
 #define KEY_DELETE      0x102
@@ -1344,7 +1344,7 @@ static const char key_shifted[128] = {
 
 static void keyboard_queue_push(uint16_t c)
 {
-    uint8_t next = (uint8_t)(key_head + 1);
+    uint8_t next = (uint8_t)((key_head + 1) & 127);
 
     if (next == key_tail)
         return; /* queue full */
@@ -1391,7 +1391,7 @@ static uint16_t keyboard_getkey(void)
     for (;;) {
         if (key_tail != key_head) {
             uint16_t key = key_queue[key_tail];
-            key_tail = (uint8_t)(key_tail + 1);
+            key_tail = (uint8_t)((key_tail + 1) & 127);
             return key;
         }
 
@@ -1405,33 +1405,58 @@ static char command[COMMAND_MAX + 1];
 static int command_len = 0;
 static int command_cursor = 0;
 
+#define PROMPT_COL 9
+static int prompt_row = 0;   /* screen row where the current prompt starts */
+
 static void shell_prompt(void)
 {
     terminal_write("jupiter> ");
+    prompt_row = cursor_row;
     shell_async_midline = 0;
     shell_input_active = 1;
+}
+
+static void screen_scroll_one(void)
+{
+    for (int r = 1; r < VGA_HEIGHT; r++)
+        for (int c = 0; c < VGA_WIDTH; c++)
+            VGA_MEMORY[(r - 1) * VGA_WIDTH + c] =
+                VGA_MEMORY[r * VGA_WIDTH + c];
+    for (int c = 0; c < VGA_WIDTH; c++)
+        VGA_MEMORY[(VGA_HEIGHT - 1) * VGA_WIDTH + c] =
+            ((uint16_t)terminal_color << 8) | ' ';
+}
+
+static void shell_place_cursor(void)
+{
+    int pos = PROMPT_COL + command_cursor;
+    cursor_row = prompt_row + pos / VGA_WIDTH;
+    cursor_col = pos % VGA_WIDTH;
+    cursor_update();
 }
 
 static void shell_redraw(void)
 {
     uint32_t flags = irq_save();
-    int i;
-    int row = cursor_row;
-    int prompt_col = 9;
 
-    /*
-     * Redraw the command at absolute VGA positions.  Do not use
-     * terminal_putc() here because the hardware cursor may currently be
-     * in the middle of the command.
-     */
-    for (i = 0; i < COMMAND_MAX; i++) {
+    /* Scroll if the command now reaches below the last screen row. */
+    while (prompt_row + (PROMPT_COL + command_len) / VGA_WIDTH >= VGA_HEIGHT) {
+        screen_scroll_one();
+        prompt_row--;
+    }
+
+    /* Draw (and clear the leftovers of) the command at absolute positions. */
+    for (int i = 0; i < COMMAND_MAX; i++) {
+        int pos = PROMPT_COL + i;
+        int row = prompt_row + pos / VGA_WIDTH;
+        if (row >= VGA_HEIGHT)
+            break;
         char c = (i < command_len) ? command[i] : ' ';
-        VGA_MEMORY[row * VGA_WIDTH + prompt_col + i] =
+        VGA_MEMORY[row * VGA_WIDTH + pos % VGA_WIDTH] =
             ((uint16_t)terminal_color << 8) | (uint8_t)c;
     }
 
-    cursor_col = prompt_col + command_cursor;
-    cursor_update();
+    shell_place_cursor();
     irq_restore(flags);
 }
 
@@ -1439,10 +1464,14 @@ static void shell_async_begin(void)
 {
     if (!shell_input_active || shell_async_midline)
         return;
-    /* Wipe the prompt line so the output starts at column 0. */
-    for (int c = 0; c < VGA_WIDTH; c++)
-        VGA_MEMORY[cursor_row * VGA_WIDTH + c] =
-            ((uint16_t)terminal_color << 8) | ' ';
+    int last = prompt_row + (PROMPT_COL + command_len) / VGA_WIDTH;
+    if (last >= VGA_HEIGHT)
+        last = VGA_HEIGHT - 1;
+    for (int r = prompt_row; r <= last; r++)
+        for (int c = 0; c < VGA_WIDTH; c++)
+            VGA_MEMORY[r * VGA_WIDTH + c] =
+                ((uint16_t)terminal_color << 8) | ' ';
+    cursor_row = prompt_row;
     cursor_col = 0;
     cursor_update();
 }
@@ -1452,6 +1481,7 @@ static void shell_prompt_restore(void)
     if (cursor_col != 0)
         terminal_putc('\n');
     terminal_write("jupiter> ");
+    prompt_row = cursor_row;
     shell_redraw();
     shell_async_midline = 0;
 }
@@ -1471,8 +1501,7 @@ static void shell_move_left(void)
 {
     if (command_cursor > 0) {
         command_cursor--;
-        cursor_col--;
-        cursor_update();
+        shell_place_cursor();
     }
 }
 
@@ -1480,8 +1509,7 @@ static void shell_move_right(void)
 {
     if (command_cursor < command_len) {
         command_cursor++;
-        cursor_col++;
-        cursor_update();
+        shell_place_cursor();
     }
 }
 
@@ -1510,7 +1538,6 @@ static void shell_backspace(void)
 
     command_len--;
     command_cursor--;
-    cursor_col--;
     shell_redraw();
 }
 
@@ -1590,7 +1617,7 @@ static void shell_exec(const char *args)
     if (!background) {
         /* Keep the shell prompt hidden until the foreground process exits. */
         while (tasks[pid].state != TASK_ZOMBIE)
-            __asm__ volatile ("hlt");
+            __asm__ volatile ("hlt" : : : "memory");
         reap_task(pid);
     }
 }
@@ -1628,7 +1655,7 @@ static void shell_wait(uint32_t pid)
     }
     terminal_write("Waiting for process "); print_uint(pid); terminal_write("...\n");
     while (tasks[pid].state != TASK_ZOMBIE)
-        __asm__ volatile ("hlt");
+        __asm__ volatile ("hlt" : : : "memory");
     terminal_write("Process "); print_uint(pid); terminal_write(" exited with code ");
     print_uint(tasks[pid].exit_code); terminal_putc('\n');
     reap_task((int)pid);
@@ -1946,8 +1973,9 @@ void kmain(void)
         {
             shell_backspace();
         }
-        else if (key == '\n')
-        {
+        else if (key == '\n') {
+            command_cursor = command_len;
+            shell_place_cursor();
             shell_input_active = 0;
             shell_execute();
             command_len = 0;
